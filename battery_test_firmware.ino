@@ -1,89 +1,147 @@
 #define CMD_STRT 0xB3
 
 #define CMD_PING 0x00
-#define CMD_ASSI 0x01
 #define CMD_DATA 0x02
 #define CMD_STND 0x04
 #define CMD_DISC 0x05
 #define CMD_CHAR 0x06
 #define CMD_COMP 0x07
-#define CMD_END  0x08
 
-#define CMD_MAX_PAYLOAD_LENGTH 12
+#define RX_CMD_LENGTH 3
+#define TX_CMD_MAX_LENGTH 12
 
-bool startDelimiterFound = false;
-bool commandIdFound = false;
+uint8_t rxBuffer[RX_CMD_LENGTH];
+uint8_t txBuffer[TX_CMD_MAX_LENGTH];
 
-uint8_t benchID = 0xFF;
-uint8_t frameLengths[] = { 4, 4, 13, 0, 3, 3, 3, 4 };
-uint8_t currentFrameLength = 0;
-uint8_t frameIdx = 0;
-uint8_t rxBuffer[CMD_MAX_PAYLOAD_LENGTH];
-uint8_t txBuffer[CMD_MAX_PAYLOAD_LENGTH];
+enum ExperimentStatus{
+  Discharge = 0x00,
+  Charge = 0x01,
+  InProgress = 0x05,
+  Failed = 0x06,
+  Success = 0x07,
+  Idle = 0x03
+} status;
+
+enum Command{
+  Ping,
+  RequestData,
+  SetStandBy,
+  SetDischarge,
+  SetCharge,
+  BadCommand
+};
+
 
 void setup() {
-    Serial.begin(115200);
+
+  Serial.begin(119200);
+  status = ExperimentStatus::Idle;
+
+  pinMode(13, OUTPUT);
+  digitalWrite(13, HIGH);
+
 }
 
 void loop() {
-    while (Serial.available() == 0);
 
-    uint8_t incomingByte = Serial.read();
+  //has to be changed *********************************
+  while(Serial.available() != 3);
 
-    if (startDelimiterFound && !commandIdFound) {
-      if (incomingByte == 0x03 || incomingByte >= CMD_END) {
-        startDelimiterFound = false;
-      } else {
-        commandIdFound = true;
-        currentFrameLength = frameLengths[incomingByte];
-        frameIdx = 1;
-        rxBuffer[0] = incomingByte;
-      }
-    } else if (startDelimiterFound && commandIdFound) {
-      rxBuffer[frameIdx++] = incomingByte;
-      if (frameIdx == currentFrameLength) {
-        parseCommand();
-      }
+  Command Incomming = ReadCommand();
 
-      if (frameIdx > CMD_MAX_PAYLOAD_LENGTH) {
-        startDelimiterFound = false;
-        commandIdFound = false;
-      }
-    } else {
-      if (incomingByte == CMD_STRT)
-        startDelimiterFound = true;
+  if(Incomming != Command::BadCommand && Incomming != Command::RequestData){
+    ChangeStatus(Incomming);
+    SendStatus();
+  }
+  else if(Incomming == Command::RequestData)
+    SendData();
+  else
+    SendBadRequest();
+
+}
+
+Command ReadCommand(){
+
+  int byte_num = 0;
+
+  rxBuffer[byte_num++] = Serial.read();
+  rxBuffer[byte_num++] = Serial.read();
+  rxBuffer[byte_num++] = Serial.read();
+
+
+  //Check DILIMITER
+  if(rxBuffer[0] != CMD_STRT)
+    return Command::BadCommand; //bad DILIMITER
+
+
+
+  /*
+  has to be changed ***********************************
+  //Check CheckSum
+  uint8_t checksum = CMD_STRT;
+  for (int i = 1; i < RX_CMD_LENGTH; i++)
+    checksum ^= rxBuffer[i];
+
+  if(checksum != rxBuffer[RX_CMD_LENGTH - 1])
+    return Command::BadCommand; //bad Checksum
+  */
+
+
+  if(rxBuffer[1] == CMD_PING)
+    return Command::Ping;
+
+  if(rxBuffer[1] == CMD_DATA)
+    return Command::RequestData;
+  
+  if(rxBuffer[1] == CMD_STND)
+    return Command::SetStandBy;
+
+  if(rxBuffer[1] == CMD_DISC)
+    return Command::SetDischarge;
+
+  if(rxBuffer[1] == CMD_CHAR)
+    return Command::SetCharge;
+
+  return Command::BadCommand; //invalid Command id
+}
+
+void ChangeStatus(Command command){
+  switch (command){
+      case Command::SetStandBy:
+        status = ExperimentStatus::Idle;
+        return;
+      case Command::SetDischarge:
+        status = ExperimentStatus::Discharge;
+        return;
+
+      case Command::SetCharge:
+        status = ExperimentStatus::Charge;
+        return;
+
+      default:
+        return;
     }
 }
 
-void parseCommand() {
-  uint8_t checksum = CMD_STRT;
-  for (int i = 0; i < currentFrameLength - 1; i++)
-    checksum ^= rxBuffer[i];
+void SendStatus(){
+  
+  byte buf[3]={ CMD_STRT , status  , CMD_STRT ^ status };
 
-  if (checksum != rxBuffer[currentFrameLength - 1])
-    return;
+  Serial.write(buf, 3);
 
-  switch (rxBuffer[0]) {
-  case CMD_PING:
-    Serial.write((uint8_t)CMD_STRT);
-    Serial.write((uint8_t)CMD_PING);
-    Serial.write(benchID);
-    Serial.write(checksum);
-    break;
-  case CMD_ASSI:
-    benchID = rxBuffer[1];
-    break;
-  case CMD_DATA:
-    break;
-  case CMD_STND:
-    break;
-  case CMD_DISC:
-    break;
-  case CMD_CHAR:
-    break;
-  case CMD_COMP:
-    break;
-  default:
-    break;
-  }
+}
+
+void SendData(){
+
+  //has to be changed **************************************************
+  Serial.write(-1);
+  Serial.write(-2);
+  Serial.write(-3);
+}
+
+void SendBadRequest(){
+
+  //has to be changed ***************************************************
+  byte buf[3]={CMD_STRT,status,CMD_STRT ^ status};
+  Serial.write(rxBuffer, 3);
 }
