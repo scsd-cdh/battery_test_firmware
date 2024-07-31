@@ -1,3 +1,4 @@
+
 #define CMD_STRT 0xB3
 
 #define CMD_PING 0x00
@@ -11,16 +12,18 @@
 #define TX_CMD_MAX_LENGTH 12
 
 uint8_t rxBuffer[RX_CMD_LENGTH];
-uint8_t txBuffer[TX_CMD_MAX_LENGTH];
 
-enum ExperimentStatus{
-  Discharge = 0x00,
-  Charge = 0x01,
-  InProgress = 0x05,
-  Failed = 0x06,
-  Success = 0x07,
-  Idle = 0x03
-} status;
+enum BatteryBenchState{
+	Standby,
+	Charge,
+	Discharge
+} bench_state;
+
+enum CompletionStatus{
+  Success,
+	Fail,
+	InProgress
+} completion_status;
 
 enum Command{
   Ping,
@@ -28,18 +31,15 @@ enum Command{
   SetStandBy,
   SetDischarge,
   SetCharge,
+  RequestCompletion,
   BadCommand
 };
 
 
 void setup() {
 
-  Serial.begin(119200);
-  status = ExperimentStatus::Idle;
-
-  pinMode(13, OUTPUT);
-  digitalWrite(13, HIGH);
-
+  Serial.begin(19200);
+  bench_state = BatteryBenchState::Standby;
 }
 
 void loop() {
@@ -49,14 +49,41 @@ void loop() {
 
   Command Incomming = ReadCommand();
 
-  if(Incomming != Command::BadCommand && Incomming != Command::RequestData){
-    ChangeStatus(Incomming);
-    SendStatus();
+  switch (Incomming){
+
+      case Command::Ping:
+        SendBenchStatus();
+        break;
+
+      case Command::RequestData:
+        SendData();
+        break;
+
+      case Command::SetStandBy:
+        bench_state = BatteryBenchState::Standby;
+        SendBenchStatus();
+        break;
+
+      case Command::SetDischarge:
+        bench_state = BatteryBenchState::Discharge;
+        SendBenchStatus();
+        break;
+
+      case Command::SetCharge:
+        bench_state = BatteryBenchState::Charge;
+        SendBenchStatus();
+        break;
+
+      case Command::RequestCompletion:
+        SendCompletionStatus();
+        break;
+
+      case Command::BadCommand:
+        SendBadRequest();
+        break;
+
   }
-  else if(Incomming == Command::RequestData)
-    SendData();
-  else
-    SendBadRequest();
+
 
 }
 
@@ -102,32 +129,25 @@ Command ReadCommand(){
   if(rxBuffer[1] == CMD_CHAR)
     return Command::SetCharge;
 
+  if(rxBuffer[1] == CMD_COMP)
+    return Command::RequestCompletion;
+
   return Command::BadCommand; //invalid Command id
 }
 
-void ChangeStatus(Command command){
-  switch (command){
-      case Command::SetStandBy:
-        status = ExperimentStatus::Idle;
-        return;
-      case Command::SetDischarge:
-        status = ExperimentStatus::Discharge;
-        return;
-
-      case Command::SetCharge:
-        status = ExperimentStatus::Charge;
-        return;
-
-      default:
-        return;
-    }
-}
-
-void SendStatus(){
+void SendBenchStatus(){
   
-  byte buf[3]={ CMD_STRT , status  , CMD_STRT ^ status };
+  byte buf[3] = { CMD_STRT , bench_state  , CMD_STRT ^ bench_state };
 
   Serial.write(buf, 3);
+
+}
+
+void SendCompletionStatus(){
+
+  byte buf[4] = { CMD_STRT , bench_state , completion_status , CMD_STRT ^ bench_state ^ completion_status };
+
+    Serial.write(buf, 4);
 
 }
 
@@ -141,7 +161,8 @@ void SendData(){
 
 void SendBadRequest(){
 
-  //has to be changed ***************************************************
-  byte buf[3]={CMD_STRT,status,CMD_STRT ^ status};
-  Serial.write(rxBuffer, 3);
+  //has to be changed **************************************************
+  Serial.write(-10);
+  Serial.write(-20);
+  Serial.write(-30);
 }
