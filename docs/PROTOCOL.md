@@ -107,3 +107,7 @@ If the bench fails at discharging the battery, it would then send the following 
 
 | 0xB3 | 0x07 | 0x82 (0b10000010) | Checksum |
 |----------|----------|----------|----------|
+
+### Checksum
+
+The checksum will be computed using the CRC-8-AUTOSAR algorithm
