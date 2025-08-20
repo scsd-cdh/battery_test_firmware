@@ -28,10 +28,12 @@ Given any number of benches are allowed to connect to the GUI at one time, a con
 
 Once every second, the bench will send a ping command including it's identification number. If the bench hasn't been assigned an identification number, it will instead send `0xFF`.
 
-If the GUI receives `0xFF`, it shall generate a number between 0 and 255 and assign that number as the ID for the bench using the following command:
+If the GUI receives `0xFF`, it shall generate a number between 0 and 254 and assign that number as the ID for the bench using the following command:
 
 | 0xB3 | 0x01 | New ID | Checksum |
 |----------|----------|----------|----------|
+
+Assign the ID incrementally (i.e. 1,2,3,4 or 5,6,7,8).
 
 The firmware will receive the command and claim the ID. Any following Ping command received from the hardware shall be replied to with an identical frame. For example, if the hardware sends:
 
