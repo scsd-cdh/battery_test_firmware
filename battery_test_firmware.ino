@@ -1,32 +1,57 @@
+//Must add the following manager, for the pico api 
+//https://github.com/earlephilhower/arduino-pico/releases/download/global/package_rp2040_index.json
+//It save alot of time dealing with the registers
+#include "hardware/irq.h"
+#include <Arduino.h>
+#include <SPI.h> 
+#include "pico/stdlib.h"         
+#include "hardware/rtc.h" 
 
+//Renaming The ENcoding
 #define CMD_STRT 0xB3
 
 #define CMD_PING 0x00
+#define CMD_ID 0x01
 #define CMD_DATA 0x02
 #define CMD_STND 0x04
 #define CMD_DISC 0x05
 #define CMD_CHAR 0x06
 #define CMD_COMP 0x07
 
-#define RX_CMD_LENGTH 3
+#define RX_CMD_LENGTH 4 // 0xB3 |Frame ID | ping | Checksum - what about data request ?
 #define TX_CMD_MAX_LENGTH 12
 
+//spi stuff
+constexpr uint8_t PIN_MOSI = 16;   // GP16
+constexpr uint8_t PIN_MISO = 19;   // GP19
+constexpr uint8_t PIN_SCK  = 18;   // GP18
+constexpr uint8_t PIN_CS   = 20;   // GP20
+SPIClass &spiCustom = SPI1;  //There is spi0 and spi1 must chose
+constexpr uint32_t SPI_CLOCK_HZ = 8'000'000;   // 8 MHz
+SPISettings spiSettings(SPI_CLOCK_HZ, MSBFIRST, SPI_MODE0);
+uint16_t BenchIVT(uint16_t Att_Chan);
+
+
+
+//Variable used to read
 uint8_t rxBuffer[RX_CMD_LENGTH];
 
+// List of possible states
 enum BatteryBenchState{
-	Standby,
-	Charge,
-	Discharge
+  Standby,
+  Charge,
+  Discharge
 } bench_state;
 
 enum CompletionStatus{
   Success,
-	Fail,
-	InProgress
+  Fail,
+  InProgress
 } completion_status;
 
 enum Command{
   Ping,
+  ID,
   RequestData,
   SetStandBy,
   SetDischarge,
@@ -34,92 +59,148 @@ enum Command{
   RequestCompletion,
   BadCommand
 };
+// Make sure to change the protocol to excule 0xff as a valid value
+constexpr int  MaxBench = 4; //Set the number of bench of the program
+uint8_t batteryBenches[MaxBench]; // array that hold the ids of the bench
 
 
+//Flag to see if the GUI has responded to the ping
+bool BencheFlag[MaxBench];
+
+
+int isValidId( uint8_t id); //If Id is valid, return the index and -1 otherwise
+//Iram means is must be in the ram, and It is the interrupt handler for the 1 second timer
+
+int CurrentId; //Hold the index of the id that we are working with
+
+//The flag for the alarm
+volatile bool TimerFlag = false;
+
+//----------------------------------------------------------------------------------------
 void setup() {
+  //should reset the  TCA6408A
+  SPI1.end();
 
+
+  for (int i = 0; i< MaxBench; i++){
+  BencheFlag[i] = false;      //set flase when first change     
+ 
+}
+for (int i = 0; i< MaxBench; i++){ //Setting the Array of ID
+  batteryBenches[i] = 0xff;          
+ 
+}
+  pinMode(PIN_CS, OUTPUT);
+  digitalWrite(PIN_CS, HIGH);//must turn off before transmetting 
+  SPI1.setRX(PIN_MISO);   // MISO
+  SPI1.setTX(PIN_MOSI);   // MOSI
+  SPI1.setSCK(PIN_SCK);   // SCK
+  SPI1.begin();
   Serial.begin(19200);
-  bench_state = BatteryBenchState::Standby;
+  while (!Serial) { ; } 
+ 
+int64_t TimerHandler(alarm_id_t alarm_id, void *user_data);
+add_alarm_in_us(
+    1'000'000ULL,   // delay = 1 second 
+    TimerHandler,   
+    nullptr,        
+    true            // set to true so the callback can request repeats
+);
 }
 
+
 void loop() {
+  //Timer Flag stuff here 
+  if (TimerFlag) {
+    TimerFlag = false; //Reset the timer flag
+    
+    for (int i = 0; i< MaxBench; i++){
+    BencheFlag[i] = false;//must reset old bencheFlag  
+    SendBenchId(batteryBenches[i]);//Sending the pings every time the flag is flipflopped   
+      }                
+  }
+  
 
-  //has to be changed *********************************
-  while(Serial.available() != 3);
-
+if (Serial.available() > 0) {//check that there is something to read
+  //Receive
   Command Incomming = ReadCommand();
 
   switch (Incomming){
 
-      case Command::Ping:
-        SendBenchStatus();
-        break;
+      case Command::Ping:{
+            int temp = isValidId( rxBuffer[2]); //check if id exist 
+            if (temp != -1){
+              BencheFlag[temp] = true; 
+            }else { SendBadRequest();}
+                 
+        break;}
+         
 
-      case Command::RequestData:
+      case Command::RequestData:{
         SendData();
-        break;
+        break;}
 
-      case Command::SetStandBy:
+      case Command::SetStandBy:{
         bench_state = BatteryBenchState::Standby;
-        SendBenchStatus();
-        break;
+        //must confirm ? 
+        break;}
 
-      case Command::SetDischarge:
+      case Command::SetDischarge:{
         bench_state = BatteryBenchState::Discharge;
-        SendBenchStatus();
-        break;
+        break;}
 
-      case Command::SetCharge:
+      case Command::SetCharge:{
         bench_state = BatteryBenchState::Charge;
-        SendBenchStatus();
-        break;
+       
+        break;}
 
-      case Command::RequestCompletion:
+      case Command::RequestCompletion:{
         SendCompletionStatus();
-        break;
+        break;}
 
-      case Command::BadCommand:
+      case Command::BadCommand:{
         SendBadRequest();
-        break;
-
+        break;}
+       }
   }
+}
+uint16_t BenchIVT(uint16_t Att_Chan){
+  Att_Chan = (0b0001000000000000 | Att_Chan <<7); //must check D|06 depeding on the Ref
+  digitalWrite(PIN_CS, LOW);
+  uint16_t r = SPI1.transfer16(Att_Chan);
+  digitalWrite(PIN_CS, HIGH);
+  digitalWrite(PIN_CS, LOW);
+  r = SPI1.transfer16(0x0000); //send a dummy
+  digitalWrite(PIN_CS, HIGH);
+  return r;
+}
+int64_t TimerHandler(alarm_id_t alarm_id, void *user_data)
+{
+    (void)alarm_id;   
+    (void)user_data; 
 
-
+    TimerFlag = true;        
+    return 1'000'000;               
 }
 
 Command ReadCommand(){
 
   int byte_num = 0;
+  //Is there cases where we need more than 4 (we need to check the checksum and send bad command
+  rxBuffer[byte_num++] = Serial.read(); //Check the CMD_STRT
+  rxBuffer[byte_num++] = Serial.read(); //Check what command it is
 
-  rxBuffer[byte_num++] = Serial.read();
-  rxBuffer[byte_num++] = Serial.read();
-  rxBuffer[byte_num++] = Serial.read();
-
-
+  // Dont forget to add the Checksum
   //Check DILIMITER
   if(rxBuffer[0] != CMD_STRT)
     return Command::BadCommand; //bad DILIMITER
 
-
-
-  /*
-  has to be changed ***********************************
-  //Check CheckSum
-  uint8_t checksum = CMD_STRT;
-  for (int i = 1; i < RX_CMD_LENGTH; i++)
-    checksum ^= rxBuffer[i];
-
-  if(checksum != rxBuffer[RX_CMD_LENGTH - 1])
-    return Command::BadCommand; //bad Checksum
-  */
-
-
   if(rxBuffer[1] == CMD_PING)
     return Command::Ping;
-
+   
   if(rxBuffer[1] == CMD_DATA)
     return Command::RequestData;
-  
+ 
   if(rxBuffer[1] == CMD_STND)
     return Command::SetStandBy;
 
@@ -134,15 +215,11 @@ Command ReadCommand(){
 
   return Command::BadCommand; //invalid Command id
 }
-
-void SendBenchStatus(){
-  
-  byte buf[3] = { CMD_STRT , bench_state  , CMD_STRT ^ bench_state };
-
-  Serial.write(buf, 3);
-
+void SendBenchId(uint8_t IDeas){
+  byte buf[4] = {CMD_STRT , CMD_PING, IDeas,  CMD_STRT ^ CMD_PING ^ IDeas};
+  Serial.write(buf,4);
+ 
 }
-
 void SendCompletionStatus(){
 
   byte buf[4] = { CMD_STRT , bench_state , completion_status , CMD_STRT ^ bench_state ^ completion_status };
@@ -152,11 +229,23 @@ void SendCompletionStatus(){
 }
 
 void SendData(){
-
+/*   Ptcl = 0xB3 
+  Cmd = 0x02
+  Battery Temp MSB  
+  Battery Temp LSB  
+  Bench Temp MSB  GP26 Internal Adc ? 
+  Bench Temp LSB  
+  Load MSB = 0x00  //not how it is connected to the board beside p2
+  Load LSB = 0x00 
+  Battery Voltage MSB 
+  Battery Voltage LSB 
+  Bench Current MSB 
+  Bench Current LSB 
+  Checksum
   //has to be changed **************************************************
   Serial.write(-1);
   Serial.write(-2);
-  Serial.write(-3);
+  Serial.write(-3); */
 }
 
 void SendBadRequest(){
@@ -165,4 +254,21 @@ void SendBadRequest(){
   Serial.write(-10);
   Serial.write(-20);
   Serial.write(-30);
+}
+
+int isValidId( uint8_t id) {
+  for (int i = 0; i < MaxBench; i++) {
+    if (batteryBenches[i] == id) {
+      return i; // return the index 
+    }
+  }
+  return -1; // return -1 if not found
+}
+int findFirstZeroId(uint8_t* array, int size) {//remove the pointer and just put the array in the body
+  for (int i = 0; i < size; i++) {
+    if (array[i] == 0xff) {
+      return i;
+    }
+  }
+  return -1; // return -1 if not found
 }
