@@ -4,6 +4,7 @@
 #include "hardware/irq.h"
 #include <Arduino.h>
 #include <SPI.h> 
+#include <Wire.h>
 #include "pico/stdlib.h"         
 #include "hardware/rtc.h" 
 
@@ -16,10 +17,10 @@
 #define CMD_STND 0x04
 #define CMD_DISC 0x05
 #define CMD_CHAR 0x06
-#define CMD_COMP 0x07
+#define CMD_ACK 0x08
 
-#define RX_CMD_LENGTH 4 // 0xB3 |Frame ID | ping | Checksum - what about data request ?
-#define TX_CMD_MAX_LENGTH 12
+#define RX_CMD_LENGTH 14// 0xB3 |Frame ID | ping | Checksum - what about data request ?
+#define TX_CMD_MAX_LENGTH 14
 
 //spi stuff
 constexpr uint8_t PIN_MOSI = 16;   // GP16
@@ -34,6 +35,7 @@ uint16_t BenchIVT(uint16_t Att_Chan);
 
 
 //Variable used to read
+uint8_t CurrentBufferSize = 0;
 uint8_t rxBuffer[RX_CMD_LENGTH];
 
 // List of possible states
@@ -56,7 +58,6 @@ enum Command{
   SetStandBy,
   SetDischarge,
   SetCharge,
-  RequestCompletion,
   BadCommand
 };
 // Make sure to change the protocol to excule 0xff as a valid value
@@ -65,9 +66,14 @@ uint8_t batteryBenches[MaxBench]; // array that hold the ids of the bench
 
 
 //Flag to see if the GUI has responded to the ping
-bool BencheFlag[MaxBench];
+volatile bool BencheFlag[MaxBench];
 
-
+int BufSize (int8_t  CMD);
+void SendData();
+void Ack();
+void Nack();
+Command ReadCommand();
+int findFirstZeroId();
 int isValidId( uint8_t id); //If Id is valid, return the index and -1 otherwise
 //Iram means is must be in the ram, and It is the interrupt handler for the 1 second timer
 
@@ -101,7 +107,7 @@ for (int i = 0; i< MaxBench; i++){ //Setting the Array of ID
  
 int64_t TimerHandler(alarm_id_t alarm_id, void *user_data);
 add_alarm_in_us(
-    1'000'000ULL,   // delay = 1 second 
+    1'000'000ULL,   // delay = 2second 
     TimerHandler,   
     nullptr,        
     true            // set to true so the callback can request repeats
@@ -115,23 +121,35 @@ void loop() {
     TimerFlag = false; //Reset the timer flag
     
     for (int i = 0; i< MaxBench; i++){
+      if(BencheFlag[i]==false){
+          batteryBenches[i] = 0xff; //reset flag
+
+      } 
     BencheFlag[i] = false;//must reset old bencheFlag  
-    SendBenchId(batteryBenches[i]);//Sending the pings every time the flag is flipflopped   
+    //SendBenchId(batteryBenches[i]);//Sending the pings every time the flag is flipflopped   
       }                
   }
   
 
 if (Serial.available() > 0) {//check that there is something to read
   //Receive
+  //must read everything for a set command
   Command Incomming = ReadCommand();
 
   switch (Incomming){
-
       case Command::Ping:{
             int temp = isValidId( rxBuffer[2]); //check if id exist 
-            if (temp != -1){
+            if (temp >= 0){
               BencheFlag[temp] = true; 
-            }else { SendBadRequest();}
+            }else { 
+              int temp2 =findFirstZeroId();
+              if (temp2 != -1 ){
+                BencheFlag[temp2]= true;
+                batteryBenches[temp2] = rxBuffer[2];
+              }else Nack();
+              
+            }
+            
                  
         break;}
          
@@ -154,16 +172,13 @@ if (Serial.available() > 0) {//check that there is something to read
        
         break;}
 
-      case Command::RequestCompletion:{
-        SendCompletionStatus();
-        break;}
-
       case Command::BadCommand:{
-        SendBadRequest();
+        Nack();
         break;}
        }
   }
 }
+
 uint16_t BenchIVT(uint16_t Att_Chan){
   Att_Chan = (0b0001000000000000 | Att_Chan <<7); //must check D|06 depeding on the Ref
   digitalWrite(PIN_CS, LOW);
@@ -190,7 +205,14 @@ Command ReadCommand(){
   rxBuffer[byte_num++] = Serial.read(); //Check the CMD_STRT
   rxBuffer[byte_num++] = Serial.read(); //Check what command it is
 
-  // Dont forget to add the Checksum
+  CurrentBufferSize = BufSize (rxBuffer[byte_num++] );
+  for (byte_num; byte_num < CurrentBufferSize ;byte_num++){
+      rxBuffer[byte_num] = Serial.read();
+
+  }
+
+  if(ChecksumCheck () ==0)
+    return Command::BadCommand;
   //Check DILIMITER
   if(rxBuffer[0] != CMD_STRT)
     return Command::BadCommand; //bad DILIMITER
@@ -210,9 +232,6 @@ Command ReadCommand(){
   if(rxBuffer[1] == CMD_CHAR)
     return Command::SetCharge;
 
-  if(rxBuffer[1] == CMD_COMP)
-    return Command::RequestCompletion;
-
   return Command::BadCommand; //invalid Command id
 }
 void SendBenchId(uint8_t IDeas){
@@ -220,17 +239,22 @@ void SendBenchId(uint8_t IDeas){
   Serial.write(buf,4);
  
 }
-void SendCompletionStatus(){
 
-  byte buf[4] = { CMD_STRT , bench_state , completion_status , CMD_STRT ^ bench_state ^ completion_status };
 
-    Serial.write(buf, 4);
+void Ack(){
+  byte buf[3]= {CMD_STRT, CMD_ACK, 1};
+  Serial.write(buf, 3);
 
 }
+void Nack(){
+  byte buf[3]= {CMD_STRT, CMD_ACK, 0};
+  Serial.write(buf, 3);
 
+}
 void SendData(){
-/*   Ptcl = 0xB3 
+/*Ptcl = 0xB3 
   Cmd = 0x02
+  BenchId = Currentid;
   Battery Temp MSB  
   Battery Temp LSB  
   Bench Temp MSB  GP26 Internal Adc ? 
@@ -247,26 +271,32 @@ void SendData(){
   Serial.write(-2);
   Serial.write(-3); */
 }
-
-void SendBadRequest(){
-
-  //has to be changed **************************************************
-  Serial.write(-10);
-  Serial.write(-20);
-  Serial.write(-30);
+bool ChecksumCheck (){
+  uint8_t checksum =0xB3;
+  for (int i =1; i < CurrentBufferSize-1; i++){
+    checksum = checksum ^ rxBuffer[i];
+  }
+  if (checksum == rxBuffer[CurrentBufferSize-1]) return 1;
+  return 0;
 }
+int BufSize (int8_t  CMD){
 
+  if(CMD == CMD_DATA)
+    return 14;
+  return 4;
+}
 int isValidId( uint8_t id) {
   for (int i = 0; i < MaxBench; i++) {
     if (batteryBenches[i] == id) {
       return i; // return the index 
     }
+    
   }
   return -1; // return -1 if not found
 }
-int findFirstZeroId(uint8_t* array, int size) {//remove the pointer and just put the array in the body
-  for (int i = 0; i < size; i++) {
-    if (array[i] == 0xff) {
+int findFirstZeroId() {//remove the pointer and just put the array in the body
+  for (int i = 0; i < MaxBench; i++) {
+    if (batteryBenches[i] == 0xff) {
       return i;
     }
   }
