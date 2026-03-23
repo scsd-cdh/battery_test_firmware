@@ -7,6 +7,8 @@
 #include <Wire.h>
 #include "pico/stdlib.h"         
 #include "hardware/rtc.h" 
+#include <cstdint>
+#include <cstddef>
 ///address for the Charge and discharge stuff is 0100000 32 (decimal), 20 (hexadecimal)
 //Second address for the adc is 1101110 https://octopart.com/datasheet/mcp3428-e%2Fsl-microchip-13127436 9.3.1 how to get back the orginal value 4.9.2 5.2  is important for the register manupulation 
 //Double check how the first adc work ? There is no way 1 byte is enought for the voltage reading 
@@ -21,7 +23,7 @@
 #define CMD_ACK 0x08
 #define RX_CMD_LENGTH 14// 0xB3 |Frame ID | ping | Checksum - what about data request ?
 #define TX_CMD_MAX_LENGTH 14
-#define ADC_ADDR 0x6E
+#define ADC_ADDR 0x6E // Which adc and is it correct ? 
 
 //spi stuff
 constexpr uint8_t PIN_MOSI = 16;   // GP16
@@ -39,6 +41,7 @@ uint16_t BenchIVT(uint16_t Att_Chan);
 uint8_t CurrentBufferSize = 0;
 uint8_t rxBuffer[RX_CMD_LENGTH];
 uint8_t txBuffer[TX_CMD_MAX_LENGTH];
+uint8_t RegisterMemory = 0;
 
 // List of possible states
 enum Command{
@@ -60,6 +63,7 @@ uint8_t batteryBenches[MaxBench]; // array that hold the ids of the bench
 volatile bool BencheFlag[MaxBench];
 
 int BufSize (int8_t  CMD);
+uint8_t calculate_crc8(const uint8_t* data, size_t length); // Checksumthing 
 void SendData();
 void Ack();
 void Nack();
@@ -73,7 +77,7 @@ int CurrentId; //Hold the index of the id that we are working with
 
 //The flag for the alarm
 volatile bool TimerFlag = false;
-
+uint8_t MagicReg = 0;
 //----------------------------------------------------------------------------------------
 
 void setup() {
@@ -81,12 +85,8 @@ void setup() {
   SPI.end();
   Wire.end(); 
 
-
-
-
   for (int i = 0; i< MaxBench; i++){
   BencheFlag[i] = false;      //set flase when first change     
- 
 }
 for (int i = 0; i< MaxBench; i++){ //Setting the Array of ID
   batteryBenches[i] = 0xff;          
@@ -146,7 +146,7 @@ if (Serial.available() > 0) {//check that there is something to read
   Command Incomming = ReadCommand();
 
   switch (Incomming){
-      case Command::Ping:{ 
+      case Command::Ping:{    //this is the Ping Command that was already called ? Maybe we dont need that Why we double the trouble
             int temp = isValidId( rxBuffer[2]); //check if it exist 
             if (temp >= 0){ // If the found in the array  do 
               BencheFlag[temp] = true; //Set the flag to true
@@ -285,7 +285,7 @@ uint16_t BenchIVT(uint16_t Att_Chan){// obtain the information from the adc on t
   digitalWrite(PIN_CS, LOW);
   uint16_t r = SPI.transfer16(Att_Chan);
   digitalWrite(PIN_CS, HIGH);// Better to write by changing the registers directly 
-  digitalWrite(PIN_CS, LOW);
+  digitalWrite(PIN_CS, LOW);//DO I need to add a delay here ? Is it too fast for the adc ??????
   r = SPI.transfer16(0x0000); //send a dummy
   digitalWrite(PIN_CS, HIGH);
   return r;
@@ -307,11 +307,11 @@ Command ReadCommand(){
   rxBuffer[byte_num++] = Serial.read(); //Check wSetState (uint8_t p)=+hat command it is
   rxBuffer[byte_num++] = Serial.read(); //read the id
 
-  // should check if the commad is valid first
+  // should check if the commad is valid first //WHERE THE FUCK IS THE FUCKING LOOP FOR THAT ?
   // if bad delim happens should, should cycle until next valid command
   //I dont neeed a timeout right ? no because the checksum will catch it and not probable to lose information
   
-  CurrentBufferSize = BufSize (rxBuffer[1] ); // check the FrameID to determine the size of the buffer
+  CurrentBufferSize = BufSize (rxBuffer[1] ); // check the FrameID to determine the size of the buffer //Dont we need to check if rxBuffer1 is valid first ?
   for (byte_num; byte_num < CurrentBufferSize ;byte_num++){ //Load the whole frame from the buffer 
       rxBuffer[byte_num] = Serial.read(); 
 
@@ -322,9 +322,9 @@ Command ReadCommand(){
   //Check DILIMITER
   if(rxBuffer[0] != CMD_STRT)
     return Command::BadCommand; //bad DILIMITER
-  if(ping() == 0 ) //Check if the id is valid 
+  if(ping() == 0 ) //Check if the id is valid    
     return Command::BadCommand;
-  CurrentId = isValidId(rxBuffer[1]); //Set the id used for the next command 
+  CurrentId = isValidId(rxBuffer[1]); //Set the id used for the next command  //Not sure that is correct 
 
   if(rxBuffer[1] == CMD_PING)
     return Command::Ping;
@@ -359,10 +359,11 @@ void SetState (uint8_t p){ // I2C Connection
 6 C DIR 
 7 C Charge 
 */
-  p= 1 << p; //So shift 1 to number of p
+  
+  RegisterMemory  | (1 << p); //So shift 1 to number of p // same problem as unsetstate Also B
   Wire.beginTransmission(0x20 );
   Wire.write(0x01);
-  Wire.write(p);
+  Wire.write(RegisterMemory);
   Wire.endTransmission();
 }
 void UnsetState (uint8_t p){ // I2C Connection 
@@ -375,22 +376,26 @@ void UnsetState (uint8_t p){ // I2C Connection
 5 D Charge 
 6 C DIR 
 7 C Charge 
-*/
-  p= 0 << p; //So shift 1 to number of p
+*/uint8_t temp = 0b11111111;
+
+  temp & (0 << p); //So shift 1 to number of p  /// Does it work the Way I meant it tooo ? DO I need to read the Register and then changing the bit and then writinng ?
+  RegisterMemory && temp; 
   Wire.beginTransmission(0x20 );
   Wire.write(0x01); // the output register 
-  Wire.write(p);
+  Wire.write(RegisterMemory);
   Wire.endTransmission();
 }
 
 void Ack(){
-  byte buf[4]= {CMD_STRT, CMD_ACK, 1 , CMD_STRT ^ CMD_ACK ^1};
-  Serial.write(buf,4 );
+  byte buf[4]= {CMD_STRT, CMD_ACK, 1 ,0};
+  buf[3]= calculate_crc8(buf, std::size(buf)-1);
+  Serial.write(buf, std::size(buf));
 }
 
 void Nack(){
-  byte buf[4]= {CMD_STRT, CMD_ACK, 0, CMD_STRT ^ CMD_ACK ^0};
-  Serial.write(buf, 0);
+  byte buf[4]= {CMD_STRT, CMD_ACK, 0, 0};
+  buf[3]= calculate_crc8(buf, std::size(buf)-1);
+  Serial.write(buf, std::size(buf));
 }
 uint8_t SplitBit(uint16_t in, bool a){ //byte to split, and true for lsb and false for MSB        
 
@@ -417,7 +422,7 @@ uint16_t readAdcChannel(uint8_t ch)
 
     // wait for conversion (RDY bit cleared)
     uint32_t t0 = millis(); //current system time 
-    while (millis() - t0 < 100){
+    while (millis() - t0 < 100){ //is 100 long enoguth ?
         Wire.requestFrom(ADC_ADDR, (uint8_t)3);
         if (Wire.available() == 3) {
             uint8_t msb = Wire.read();
@@ -494,10 +499,10 @@ void SendData(){
           txBuffer[11] = SplitBit(BenchIVT(14),false);
           txBuffer[12] = SplitBit(BenchIVT(14),true);
           //checksum
-          for (int i =0; i < 13; i++){
-          txBuffer[13]= txBuffer[13] ^ rxBuffer[i];
-           }
-           Serial.write(txBuffer , std::size(txBuffer));
+          
+          txBuffer[13]= calculate_crc8(txBuffer, std::size(txBuffer)-1);
+          
+          Serial.write(txBuffer , std::size(txBuffer));
             break;
           case 1:
 
@@ -521,9 +526,9 @@ void SendData(){
           txBuffer[11] = SplitBit(BenchIVT(11),false);
           txBuffer[12] = SplitBit(BenchIVT(11),true);
           //checksum
-          for (int i =0; i < 13; i++){
-          txBuffer[13]= txBuffer[13] ^ rxBuffer[i];
-           }
+          
+          txBuffer[13]= calculate_crc8(txBuffer, std::size(txBuffer)-1);
+        
            Serial.write(txBuffer , std::size(txBuffer));
             break;
           case 2:
@@ -548,9 +553,9 @@ void SendData(){
           txBuffer[11] = SplitBit(BenchIVT(4),false);
           txBuffer[12] = SplitBit(BenchIVT(4),true);
           //checksum
-          for (int i =0; i < 13; i++){
-          txBuffer[13]= txBuffer[13] ^ rxBuffer[i];
-           }
+          
+          txBuffer[13]= calculate_crc8(txBuffer, std::size(txBuffer)-1);
+           
            Serial.write(txBuffer , std::size(txBuffer));
             break;
           case 3:
@@ -575,9 +580,9 @@ void SendData(){
           txBuffer[11] = SplitBit(BenchIVT(1),false);
           txBuffer[12] = SplitBit(BenchIVT(1),true);
           //checksum
-          for (int i =0; i < 13; i++){
-          txBuffer[13]= txBuffer[13] ^ rxBuffer[i];
-           }
+          
+          txBuffer[13]= calculate_crc8(txBuffer, std::size(txBuffer)-1);
+           
            Serial.write(txBuffer , std::size(txBuffer));
             break;
           default : 
@@ -587,11 +592,8 @@ void SendData(){
 
 }
 bool ChecksumCheck (){
-  uint8_t checksum =0xB3;
-  for (int i =1; i < CurrentBufferSize-1; i++){
-    checksum = checksum ^ rxBuffer[i];
-  }
-  if (checksum == rxBuffer[CurrentBufferSize-1]) return 1;
+  
+  if (calculate_crc8(rxBuffer,CurrentBufferSize-1) == rxBuffer[CurrentBufferSize-1]) return 1;
   return 0;
 }
 int BufSize (int8_t  CMD){
@@ -604,7 +606,6 @@ int isValidId( uint8_t id) {
     if (batteryBenches[i] == id) {
       return i; // return the index 
     }
-    
   }
   return -1; // return -1 if not found
 }
@@ -618,8 +619,6 @@ int findFirstZeroId() {//remove the pointer and just put the array in the body
 }
 
 bool ping () {
-
-
   int temp = isValidId( rxBuffer[2]); //check if it exist 
             if (temp >= 0){ // If the found in the array  do 
               BencheFlag[temp] = true; //Set the flag to true
@@ -633,4 +632,32 @@ bool ping () {
               }else return 0; //otherwise Nack that shit 
               
             }
+}
+
+/**
+ * Calculates the CRC8 checksum for a given array of bytes.
+ * 
+
+ * 
+ * Note: Uses the standard CRC-8 polynomial 0x07 (x^8 + x^2 + x + 1)
+ *       Initial value is 0x00. Adjust POLYNOMIAL or INITIAL_VALUE if 
+ *       you need a different variant (e.g., Dallas/Maxim uses 0x31).
+ */
+uint8_t calculate_crc8(const uint8_t* data, size_t length) {
+    constexpr uint8_t POLYNOMIAL = 0x07;
+    constexpr uint8_t INITIAL_VALUE = 0x00;
+    
+    uint8_t crc = INITIAL_VALUE;
+
+    for (size_t i = 0; i < length; ++i) {
+        crc ^= data[i];
+        for (int bit = 0; bit < 8; ++bit) {
+            if (crc & 0x80) {
+                crc = (crc << 1) ^ POLYNOMIAL;
+            } else {
+                crc <<= 1;
+            }
+        }
+    }
+    return crc;
 }
